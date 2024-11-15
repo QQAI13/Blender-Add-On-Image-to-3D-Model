@@ -7,8 +7,8 @@ bl_info = {
     "description": "Tool to import an image, create a plane with matching aspect ratio, subdivide it, and apply a displacement modifier with the image as texture."
 }
 
-import bpy
-from bpy.props import StringProperty
+import bpy, bmesh
+from bpy.props import StringProperty, FloatProperty
 from bpy.types import Operator, Panel, AddonPreferences
 import os
 
@@ -18,6 +18,12 @@ class ImportImageAndSetupPlane(Operator):
     bl_description = "Imports an image, creates a plane with matching dimensions, subdivides, and applies displacement modifier with image texture"
     
     filepath: StringProperty(subtype="FILE_PATH")
+    desired_height: FloatProperty(
+        name="Desired Height",
+        description="Set the height of the displaced model",
+        default=1.0,
+        min=0.0
+    )
 
     def execute(self, context):
         # Load the image
@@ -32,6 +38,7 @@ class ImportImageAndSetupPlane(Operator):
         aspect_ratio = width / height
         bpy.ops.mesh.primitive_plane_add(size=1)
         plane = context.object
+        desired_height = context.scene.desired_height
         plane.name = "Displacement_Plane"
         
         # Adjust plane scale to match the image's aspect ratio
@@ -45,6 +52,7 @@ class ImportImageAndSetupPlane(Operator):
         bpy.ops.object.mode_set(mode='OBJECT')
 
         # Add displacement modifier
+        bpy.ops.object.mode_set(mode='EDIT')
         disp_mod = plane.modifiers.new(name="Displacement", type='DISPLACE')
         
         # Create a new texture for the displacement
@@ -55,14 +63,56 @@ class ImportImageAndSetupPlane(Operator):
         # Adjust displacement modifier settings
         disp_mod.texture_coords = 'UV'
         disp_mod.strength = 1.0
-
         
-        
-        # UV unwrap the plane for proper texture mapping
-        bpy.ops.object.mode_set(mode='EDIT')
-        bpy.ops.uv.smart_project()
+        # bpy.ops.uv.smart_project()
         bpy.ops.object.mode_set(mode='OBJECT')
+
+        # Apply the displacement modifier
+        bpy.context.view_layer.objects.active = plane  # Ensure the plane is the active object
+        bpy.ops.object.modifier_apply(modifier=disp_mod.name)
+
+        # Switch to edit mode to delete bottom vertices
+        bpy.ops.object.mode_set(mode='EDIT')
+
+        # Enter wireframe mode
+        bpy.context.space_data.shading.type = 'WIREFRAME'
+
+        # Initialize bmesh to work directly on the mesh data
+        bm = bmesh.from_edit_mesh(plane.data)
+
+        # Find the maximum Z coordinate (top level)
+        max_z = max(v.co.z for v in bm.verts)
+        min_z = min(v.co.z for v in bm.verts)
+        threshold = 0.1
+        self.report({'INFO'}, f"max z: {max_z}, min z: {min_z}" )
+
+        for v in bm.verts:
+            v.select = (v.co.z < (min_z + threshold))
+
+        # # Delete the selected vertices (everything except the top lid)
+        bmesh.ops.delete(bm, geom=[v for v in bm.verts if v.select], context='VERTS')
         
+        # # Update the mesh and exit edit mode
+        bmesh.update_edit_mesh(plane.data)
+        
+        # # Go back to object mode, and flatten on Z-axis
+        # bpy.ops.object.mode_set(mode='OBJECT')
+
+        # Iterate over all vertices and set their Z coordinate to 0 if they are selected
+        for vert in bm.verts:
+            vert.co.z = 0  # Set Z coordinate to 0
+
+        bmesh.update_edit_mesh(plane.data)
+
+        # bpy.context.space_data.shading.type = 'SOLID'
+
+        self.report({'INFO'}, f"Desired height: {desired_height}")
+
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.mesh.extrude_region_move(TRANSFORM_OT_translate={"value": (0, 0, desired_height)})
+        bpy.ops.object.mode_set(mode='OBJECT')
+
         self.report({'INFO'}, "Plane created and displacement modifier applied.")
         return {'FINISHED'}
     
@@ -79,16 +129,24 @@ class VIEW3D_PT_custom_panel(Panel):
 
     def draw(self, context):
         layout = self.layout
-        layout.operator("object.import_image_and_setup_plane")
+        layout.prop(context.scene, "desired_height", text="Desired Height")
+        layout.operator("object.import_image_and_setup_plane", text="Import Image")
 
 # Register and Unregister functions for add-on functionality
 def register():
     bpy.utils.register_class(ImportImageAndSetupPlane)
     bpy.utils.register_class(VIEW3D_PT_custom_panel)
+    bpy.types.Scene.desired_height = FloatProperty(
+        name="Desired Height",
+        description="Set the height of the displaced model",
+        default=1.0,
+        min=0.0
+    )
 
 def unregister():
     bpy.utils.unregister_class(ImportImageAndSetupPlane)
     bpy.utils.unregister_class(VIEW3D_PT_custom_panel)
+    del bpy.types.Scene.desired_height
 
 # Allows running the script in Blender Text Editor or as an add-on
 if __name__ == "__main__":
